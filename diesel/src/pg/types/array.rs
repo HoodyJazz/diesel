@@ -228,3 +228,195 @@ where
         ToSql::<Array<ST>, Pg>::to_sql(self, out)
     }
 }
+
+// ---- NdArray<T> type wrappers and conversion helpers ----
+#[cfg(feature = "postgres_backend")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Array<T>)]
+pub struct Vec2<T>(pub Vec<Vec<T>>);
+
+#[cfg(feature = "postgres_backend")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Array<T>)]
+pub struct Vec3<T>(pub Vec<Vec<Vec<T>>>);
+
+#[cfg(feature = "postgres_backend")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Array<T>)]
+pub struct Vec4<T>(pub Vec<Vec<Vec<Vec<T>>>>);
+
+#[cfg(feature = "postgres_backend")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Array<T>)]
+pub struct Vec5<T>(pub Vec<Vec<Vec<Vec<Vec<T>>>>>);
+
+#[cfg(feature = "postgres_backend")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Array<T>)]
+pub struct Vec6<T>(pub Vec<Vec<Vec<Vec<Vec<Vec<T>>>>>>);
+#[cfg(feature = "postgres_backend")]
+fn wrong_dim_error(expected: usize, got: usize) -> String {
+    format!("expected {expected} dimensions, got {got}")
+}
+
+#[cfg(feature = "postgres_backend")]
+fn shape_mismatch_error(expected: usize, got: usize) -> String {
+    format!("shape mismatch: expected {expected} elements, got {got}")
+}
+
+#[cfg(feature = "postgres_backend")]
+fn non_rectangular_error() -> String {
+    "non-rectangular nested vector".to_string()
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> TryFrom<NdArray<T>> for Vec2<T> {
+    type Error = String;
+
+    fn try_from(nd: NdArray<T>) -> Result<Self, Self::Error> {
+        if nd.dims.len() != 2 {
+            return Err(wrong_dim_error(2, nd.dims.len()));
+        }
+
+        let expected_len = nd.dims.iter().product::<usize>();
+
+        if nd.data.len() != expected_len {
+            return Err(shape_mismatch_error(expected_len, nd.data.len()));
+        }
+
+        if expected_len == 0 {
+            return Ok(Vec2(Vec::new()));
+        }
+
+        let num_rows = nd.dims[0];
+        let num_cols = nd.dims[1];
+
+        let mut it = nd.data.into_iter();
+        let mut out = Vec::with_capacity(num_rows);
+
+        for _ in 0..num_rows {
+            let mut row = Vec::with_capacity(num_cols);
+            row.extend(it.by_ref().take(num_cols));
+            out.push(row);
+        }
+
+        Ok(Vec2(out))
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> TryFrom<Vec2<T>> for NdArray<T> {
+    type Error = String;
+
+    fn try_from(v: Vec2<T>) -> Result<Self, Self::Error> {
+        let num_rows = v.0.len();
+        let num_cols = v.0.first().map(|r| r.len()).unwrap_or(0);
+
+        // rectangular check
+        if v.0.iter().any(|r| r.len() != num_cols) {
+            return Err(non_rectangular_error());
+        }
+
+        let mut data = Vec::with_capacity(num_rows * num_cols);
+        for mut row in v.0 {
+            data.append(&mut row);
+        }
+
+        Ok(NdArray {
+            dims: vec![num_rows, num_cols],
+            data,
+        })
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> From<Vec<Vec<T>>> for Vec2<T> {
+    fn from(v: Vec<Vec<T>>) -> Self {
+        Vec2(v)
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> From<Vec2<T>> for Vec<Vec<T>> {
+    fn from(v: Vec2<T>) -> Self {
+        v.0
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T, ST> FromSql<Array<ST>, Pg> for Vec2<T>
+where
+    T: FromSql<ST, Pg>,
+{
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
+        let nd = NdArray::<T>::from_sql(value)?;
+        Vec2::try_from(nd).map_err(Into::into)
+    }
+}
+
+// ---- tests ----
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[diesel_test_helper::test]
+    fn vec2_to_ndarray() {
+        let v = Vec2(vec![vec![1, 2, 3, 4, 5, 6]]);
+        let nd = NdArray::try_from(v).unwrap();
+
+        assert_eq!(nd.dims, vec![1, 6]);
+        assert_eq!(nd.data, vec![1, 2, 3, 4, 5, 6]);
+
+        let v = Vec2(vec![vec![1, 2, 3], vec![4, 5, 6]]);
+        let nd = NdArray::try_from(v).unwrap();
+
+        assert_eq!(nd.dims, vec![2, 3]);
+        assert_eq!(nd.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[diesel_test_helper::test]
+    fn ndarray_to_vec2() {
+        let nd = NdArray {
+            dims: vec![2, 3],
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+        let v = Vec2::try_from(nd).unwrap();
+
+        assert_eq!(v.0, vec![vec![1, 2, 3], vec![4, 5, 6]]);
+
+        let nd = NdArray {
+            dims: vec![1, 6],
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+        let v = Vec2::try_from(nd).unwrap();
+
+        assert_eq!(v.0, vec![vec![1, 2, 3, 4, 5, 6]]);
+    }
+
+    #[diesel_test_helper::test]
+    fn bad_ndarray_to_vec2() {
+        let nd = NdArray {
+            dims: vec![1, 2],
+            data: vec![1, 2, 3],
+        };
+        let err = Vec2::try_from(nd).unwrap_err();
+
+        assert_eq!(err.to_string(), shape_mismatch_error(2, 3));
+
+        let nd = NdArray {
+            dims: vec![1, 3, 1],
+            data: vec![vec![vec![1], vec![2], vec![3]]],
+        };
+        let err = Vec2::try_from(nd).unwrap_err();
+
+        assert_eq!(err.to_string(), wrong_dim_error(2, 3));
+    }
+
+    #[diesel_test_helper::test]
+    fn jagged_vec2_to_ndarray() {
+        let v = Vec2(vec![vec![1], vec![2, 3]]);
+        let err = NdArray::try_from(v).unwrap_err();
+
+        assert_eq!(err.to_string(), non_rectangular_error());
+    }
+}
