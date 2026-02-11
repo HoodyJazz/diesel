@@ -288,19 +288,18 @@ impl<T> TryFrom<NdArray<T>> for Vec2<T> {
             return Ok(Vec2(Vec::new()));
         }
 
-        let num_rows = nd.dims[0];
-        let num_cols = nd.dims[1];
-
+        let d1_len = nd.dims[0];
+        let d2_len = nd.dims[1];
         let mut it = nd.data.into_iter();
-        let mut out = Vec::with_capacity(num_rows);
+        let mut d1 = Vec::with_capacity(d1_len);
 
-        for _ in 0..num_rows {
-            let mut row = Vec::with_capacity(num_cols);
-            row.extend(it.by_ref().take(num_cols));
-            out.push(row);
+        for _ in 0..d1_len {
+            let mut d2 = Vec::with_capacity(d2_len);
+            d2.extend(it.by_ref().take(d2_len));
+            d1.push(d2);
         }
 
-        Ok(Vec2(out))
+        Ok(Vec2(d1))
     }
 }
 
@@ -354,7 +353,144 @@ where
     }
 }
 
+// fn build_nested_vector<T>(curr_dim: usize, dims: &[usize]) -> Vec2<T> {
+//     let curr_dim_len = dims[curr_dim];
+//     if curr_dim == dims.len() - 2 {
+//         let inner_dim_len = dims.last().unwrap();
+//         let mut inner_vec = Vec::with_capacity(curr_dim_len);
+//         for _ in 0..curr_dim_len {
+//             inner_vec.push(Vec::with_capacity(*inner_dim_len));
+//         }
+//         return Vec2(inner_vec);
+//     } else {
+//         let mut current_layer = Vec::with_capacity(curr_dim_len);
+//         for _ in 0..curr_dim_len {
+//             current_layer.push(build_nested_vector(curr_dim + 1, dims));
+//         }
+//         return current_layer;
+//     }
+// }
+    // [2, 2, 3, 2]
+    // [
+    //   [
+    //     [
+    //       [1, 2], [3, 4], [5, 6]
+    //     ],
+    //     [[7, 8], [9, 10], [11, 12]]
+    //   ],
+    //   [
+    //     [[1, 2], [3, 4], [5, 6]],
+    //     [[7, 8], [9, 10], [11, 12]]
+    //   ]
+    // ]
+
+#[cfg(feature = "postgres_backend")]
+impl<T> TryFrom<NdArray<T>> for Vec3<T> {
+    type Error = String;
+
+    fn try_from(nd: NdArray<T>) -> Result<Self, Self::Error> {
+        let ndims: usize = 3;
+
+        if nd.dims.len() != ndims {
+            return Err(wrong_dim_error(ndims, nd.dims.len()));
+        }
+
+        let expected_len = nd.dims.iter().product::<usize>();
+
+        if nd.data.len() != expected_len {
+            return Err(shape_mismatch_error(expected_len, nd.data.len()));
+        }
+
+        if expected_len == 0 {
+            return Ok(Vec3(Vec::new()));
+        }
+
+        let d1_len = nd.dims[0];
+        let d2_len = nd.dims[1];
+        let d3_len = nd.dims[2];
+        let mut it = nd.data.into_iter();
+        let mut d1 = Vec::with_capacity(d1_len);
+
+        for _ in 0..d1_len {
+            let mut d2 = Vec::with_capacity(d2_len);
+            for _ in 0..d2_len {
+                let mut d3 = Vec::with_capacity(d3_len);
+                d3.extend(it.by_ref().take(d3_len));
+                d2.push(d3);
+            }
+            d1.push(d2);
+        }
+
+        Ok(Vec3(d1))
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> TryFrom<Vec3<T>> for NdArray<T> {
+    type Error = String;
+
+    fn try_from(v: Vec3<T>) -> Result<Self, Self::Error> {
+        let d1_len = v.0.len();
+        let d2_len = v.0.first().map(|d2| d2.len()).unwrap_or(0);
+        let d3_len = v.0.first().map(|d2| d2.first().map(|d3| d3.len()).unwrap_or(0)).unwrap_or(0);
+
+        let data_len = d1_len * d2_len * d3_len;
+        if data_len == 0 {
+            return Ok(NdArray {
+                dims: vec![d1_len, d2_len, d3_len],
+                data: Vec::new(),
+            });
+        }
+        
+        // rectangular check
+        if v.0.iter().any(|d2| d2.len() != d2_len) {
+            return Err(non_rectangular_error());
+        }
+        if v.0.iter().any(|d2| d2.iter().any(|d3| d3.len() != d3_len)) {
+            return Err(non_rectangular_error());
+        }
+
+        let mut data = Vec::with_capacity(data_len);
+        for d2 in v.0 {
+            for d3 in d2 {
+                data.extend(d3);
+            }
+        }
+
+        Ok(NdArray {
+            dims: vec![d1_len, d2_len, d3_len],
+            data,
+        })
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> From<Vec<Vec<Vec<T>>>> for Vec3<T> {
+    fn from(v: Vec<Vec<Vec<T>>>) -> Self {
+        Vec3(v)
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T> From<Vec3<T>> for Vec<Vec<Vec<T>>> {
+    fn from(v: Vec3<T>) -> Self {
+        v.0
+    }
+}
+
+#[cfg(feature = "postgres_backend")]
+impl<T, ST> FromSql<Array<ST>, Pg> for Vec3<T>
+where
+    T: FromSql<ST, Pg>,
+{
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
+        let nd = NdArray::<T>::from_sql(value)?;
+        Vec3::try_from(nd).map_err(Into::into)
+    }
+}
+
 // ---- tests ----
+// TODO: add tests for edge cases, like zero-length dimensions, zero-length data and NULL values
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +551,68 @@ mod tests {
     #[diesel_test_helper::test]
     fn jagged_vec2_to_ndarray() {
         let v = Vec2(vec![vec![1], vec![2, 3]]);
+        let err = NdArray::try_from(v).unwrap_err();
+
+        assert_eq!(err.to_string(), non_rectangular_error());
+    }
+
+    #[diesel_test_helper::test]
+    fn vec3_to_ndarray() {
+        let v = Vec3(vec![vec![vec![1, 2, 3, 4, 5, 6]]]);
+        let nd = NdArray::try_from(v).unwrap();
+        assert_eq!(nd.dims, vec![1, 1, 6]);
+        assert_eq!(nd.data, vec![1, 2, 3, 4, 5, 6]);
+
+        let v = Vec3(vec![vec![vec![1, 2, 3], vec![4, 5, 6]]]);
+        let nd = NdArray::try_from(v).unwrap();
+        assert_eq!(nd.dims, vec![1, 2, 3]);
+        assert_eq!(nd.data, vec![1, 2, 3, 4, 5, 6]);
+
+        let v = Vec3(vec![vec![vec![1, 2], vec![2, 3], vec![3, 4]]]);
+        let nd = NdArray::try_from(v).unwrap();
+        assert_eq!(nd.dims, vec![1, 3, 2]);
+        assert_eq!(nd.data, vec![1, 2, 2, 3, 3, 4]);
+    }
+
+    #[diesel_test_helper::test]
+    fn ndarray_to_vec3() {
+        let nd = NdArray {
+            dims: vec![1, 2, 3],
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+        let v = Vec3::try_from(nd).unwrap();
+        assert_eq!(v.0, vec![vec![vec![1, 2, 3], vec![4, 5, 6]]]);
+
+        let nd = NdArray {
+            dims: vec![1, 6, 1],
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+        let v = Vec3::try_from(nd).unwrap();
+        assert_eq!(v.0, vec![vec![vec![1], vec![2], vec![3], vec![4], vec![5], vec![6]]]);
+    }
+
+    #[diesel_test_helper::test]
+    fn bad_ndarray_to_vec3() {
+        let nd = NdArray {
+            dims: vec![1, 2, 1],
+            data: vec![1, 2, 3],
+        };
+        let err = Vec3::try_from(nd).unwrap_err();
+
+        assert_eq!(err.to_string(), shape_mismatch_error(2, 3));
+
+        let nd = NdArray {
+            dims: vec![1, 3],
+            data: vec![vec![vec![1], vec![2]]],
+        };
+        let err = Vec3::try_from(nd).unwrap_err();
+
+        assert_eq!(err.to_string(), wrong_dim_error(3, 2));
+    }
+
+    #[diesel_test_helper::test]
+    fn jagged_vec3_to_ndarray() {
+        let v = Vec3(vec![vec![vec![1]], vec![vec![2, 3]]]);
         let err = NdArray::try_from(v).unwrap_err();
 
         assert_eq!(err.to_string(), non_rectangular_error());
