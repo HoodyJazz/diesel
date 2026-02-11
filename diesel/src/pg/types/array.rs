@@ -19,6 +19,27 @@ pub struct NdArray<T> {
     pub data: Vec<T>,
 }
 
+impl<T> NdArray<T> {
+    fn get(&self, indices: &[usize]) -> Option<&T> {
+        let len = self.dims.len();
+        if indices.len() != len {
+            return None;
+        }
+
+        // formular for flat index of 3d array with shape (D, H, W) for index (d, h, w) is d*H*W + h*W + w:
+        // d * (H * W) + h * W + w
+        let mut flat_index = 0;
+        for i in 0..len {
+            if indices[i] >= self.dims[i] {
+                return None;
+            }
+            flat_index += indices[i] * self.dims[i + 1..].iter().product::<usize>();
+        }
+
+        self.data.get(flat_index)
+    }
+}
+
 #[cfg(feature = "postgres_backend")]
 impl<T> HasSqlType<Array<T>> for Pg
 where
@@ -370,19 +391,19 @@ where
 //         return current_layer;
 //     }
 // }
-    // [2, 2, 3, 2]
-    // [
-    //   [
-    //     [
-    //       [1, 2], [3, 4], [5, 6]
-    //     ],
-    //     [[7, 8], [9, 10], [11, 12]]
-    //   ],
-    //   [
-    //     [[1, 2], [3, 4], [5, 6]],
-    //     [[7, 8], [9, 10], [11, 12]]
-    //   ]
-    // ]
+// [2, 2, 3, 2]
+// [
+//   [
+//     [
+//       [1, 2], [3, 4], [5, 6]
+//     ],
+//     [[7, 8], [9, 10], [11, 12]]
+//   ],
+//   [
+//     [[1, 2], [3, 4], [5, 6]],
+//     [[7, 8], [9, 10], [11, 12]]
+//   ]
+// ]
 
 #[cfg(feature = "postgres_backend")]
 impl<T> TryFrom<NdArray<T>> for Vec3<T> {
@@ -432,7 +453,10 @@ impl<T> TryFrom<Vec3<T>> for NdArray<T> {
     fn try_from(v: Vec3<T>) -> Result<Self, Self::Error> {
         let d1_len = v.0.len();
         let d2_len = v.0.first().map(|d2| d2.len()).unwrap_or(0);
-        let d3_len = v.0.first().map(|d2| d2.first().map(|d3| d3.len()).unwrap_or(0)).unwrap_or(0);
+        let d3_len =
+            v.0.first()
+                .map(|d2| d2.first().map(|d3| d3.len()).unwrap_or(0))
+                .unwrap_or(0);
 
         let data_len = d1_len * d2_len * d3_len;
         if data_len == 0 {
@@ -441,7 +465,7 @@ impl<T> TryFrom<Vec3<T>> for NdArray<T> {
                 data: Vec::new(),
             });
         }
-        
+
         // rectangular check
         if v.0.iter().any(|d2| d2.len() != d2_len) {
             return Err(non_rectangular_error());
@@ -588,7 +612,10 @@ mod tests {
             data: vec![1, 2, 3, 4, 5, 6],
         };
         let v = Vec3::try_from(nd).unwrap();
-        assert_eq!(v.0, vec![vec![vec![1], vec![2], vec![3], vec![4], vec![5], vec![6]]]);
+        assert_eq!(
+            v.0,
+            vec![vec![vec![1], vec![2], vec![3], vec![4], vec![5], vec![6]]]
+        );
     }
 
     #[diesel_test_helper::test]
@@ -616,5 +643,83 @@ mod tests {
         let err = NdArray::try_from(v).unwrap_err();
 
         assert_eq!(err.to_string(), non_rectangular_error());
+    }
+
+    #[diesel_test_helper::test]
+    fn test_ndarray_get_2d() {
+        let nd = NdArray {
+            dims: vec![2, 3],
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+
+        assert_eq!(nd.get(&[0, 0]), Some(&1));
+        assert_eq!(nd.get(&[0, 1]), Some(&2));
+        assert_eq!(nd.get(&[0, 2]), Some(&3));
+        assert_eq!(nd.get(&[1, 0]), Some(&4));
+        assert_eq!(nd.get(&[1, 1]), Some(&5));
+        assert_eq!(nd.get(&[1, 2]), Some(&6));
+
+        // out of bounds
+        assert_eq!(nd.get(&[2, 0]), None);
+        assert_eq!(nd.get(&[0, 3]), None);
+
+        // wrong number of indices
+        assert_eq!(nd.get(&[0]), None);
+        assert_eq!(nd.get(&[0, 0, 0]), None);
+    }
+
+    #[diesel_test_helper::test]
+    fn test_ndarray_get_3d() {
+        let nd = NdArray {
+            dims: vec![2, 3, 2],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        };
+
+        assert_eq!(nd.get(&[0, 0, 0]), Some(&1));
+        assert_eq!(nd.get(&[0, 0, 1]), Some(&2));
+        assert_eq!(nd.get(&[0, 1, 1]), Some(&4));
+        assert_eq!(nd.get(&[0, 2, 0]), Some(&5));
+        assert_eq!(nd.get(&[1, 0, 0]), Some(&7));
+        assert_eq!(nd.get(&[1, 2, 1]), Some(&12));
+
+        // out of bounds
+        assert_eq!(nd.get(&[2, 0, 1]), None);
+        assert_eq!(nd.get(&[0, 3, 1]), None);
+
+        // wrong number of indices
+        assert_eq!(nd.get(&[0, 0]), None);
+    }
+
+    #[diesel_test_helper::test]
+    fn test_ndarray_get_5d() {
+        let nd = NdArray {
+            dims: vec![1, 3, 2, 2, 1],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        };
+
+        // [
+        //   [
+        //     [[1], [2]],
+        //     [[3], [4]]],
+        //   [
+        //     [[5], [6]],
+        //     [[7], [8]]],
+        //   [
+        //     [[9], [10]],
+        //     [[11], [12]]],
+        // ]
+
+        assert_eq!(nd.get(&[0, 0, 0, 1, 0]), Some(&2));
+        assert_eq!(nd.get(&[0, 0, 1, 1, 0]), Some(&4));
+        assert_eq!(nd.get(&[0, 2, 1, 0, 0]), Some(&11));
+
+        // out of bounds
+        assert_eq!(nd.get(&[2, 0, 1, 0, 0]), None);
+        assert_eq!(nd.get(&[0, 3, 1, 1, 0]), None);
+
+        // wrong number of indices
+        assert_eq!(nd.get(&[0, 0]), None);
+        assert_eq!(nd.get(&[0, 0, 0]), None);
+        assert_eq!(nd.get(&[0, 0, 0, 0, 0, 0]), None);
     }
 }
